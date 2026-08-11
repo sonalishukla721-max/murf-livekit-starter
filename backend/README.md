@@ -35,6 +35,7 @@ Fill in your keys in `.env.local`:
 | `MURF_API_KEY`       | [murf.ai/api/dashboard](https://murf.ai/api/dashboard)    |
 | `DEEPGRAM_API_KEY`   | [deepgram.com](https://console.deepgram.com/)             |
 | `GOOGLE_API_KEY`     | [aistudio.google.com](https://aistudio.google.com/apikey) |
+| `LIVEKIT_SIP_OUTBOUND_TRUNK_ID` | [LiveKit Cloud](https://cloud.livekit.io/) → SIP Trunks |
 
 For LiveKit Cloud users, you can auto-populate LiveKit credentials:
 
@@ -223,6 +224,41 @@ backend/
 ├── Dockerfile             # Production container
 └── railway.toml           # Railway deploy config
 ```
+
+---
+
+## Day 6 — Outbound Telephony Calls (KrishiMitra AI)
+
+Day 6 adds automated SIP outbound calling functionality to **KrishiMitra AI** (Farm & Field Crop Price Alert voice agent) using LiveKit Cloud SIP trunking and Linphone.
+
+### Scenario: Crop Price Alert
+- **Farmer Name**: Sonali
+- **SIP Destination**: `sip:sonali721@sip.linphone.org`
+- **Crop**: Soybean
+- **Seller Threshold**: ₹5,000 per quintal
+- **Current Market Price**: ₹5,200 per quintal (Demo/Local data)
+
+### Linphone Mobile App Configuration
+To receive calls on your phone:
+1. Install **Linphone** app.
+2. Log in with account `sonali721` (`sip.linphone.org`).
+3. Open **Settings → Calls → Advanced calls settings**.
+4. Turn **OFF**: **"Media encryption mandatory"**.
+
+### Outbound Commands
+
+1. **Start the Outbound Agent**:
+   ```bash
+   uv run python src/telephony/outbound/agent.py dev
+   ```
+
+2. **Trigger an Outbound Call**:
+   ```bash
+   uv run python src/telephony/outbound/dial.py --to sonali721
+   ```
+   *(Or shortcut: `uv run python src/outbound_call.py --to sonali721`)*
+
+---
 
 ## Links
 

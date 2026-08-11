@@ -260,6 +260,72 @@ For deeper documentation on each part, see:
 
 ---
 
+## Day 6 — Outbound Telephony Calls (KrishiMitra AI)
+
+Day 6 adds automated SIP outbound calling functionality to **KrishiMitra AI** (Farm & Field Crop Price Alert voice agent) using LiveKit Cloud SIP trunking and Linphone.
+
+### Scenario: Crop Price Alert
+- **Farmer Name**: Sonali
+- **SIP Destination**: `sip:sonali721@sip.linphone.org`
+- **Crop**: Soybean
+- **Seller Threshold**: ₹5,000 per quintal
+- **Current Market Price**: ₹5,200 per quintal (Demo/Local data)
+- **Call Opening Requirements**:
+  1. **WHO**: "Hi, this is KrishiMitra AI, an automated farming assistant."
+  2. **WHY**: "I'm calling because the soybean market price has crossed your threshold of 5,000 rupees and is currently around 5,200 rupees per quintal."
+  3. **OPT-OUT**: "If you don't want to receive these price alerts, just tell me and I will stop them."
+
+### Linphone App Setup & Settings
+To receive outbound SIP calls on your phone:
+1. Install the **Linphone** app on your mobile device.
+2. Log in using your Linphone credentials (e.g. `sonali721` / domain `sip.linphone.org`).
+3. Grant **Microphone** permission.
+4. Open **Settings → Calls → Advanced calls settings**.
+5. Turn **OFF**: **"Media encryption mandatory"**.
+
+### Required Environment Variables
+Add your LiveKit SIP Outbound Trunk ID to `backend/.env.local`:
+```env
+LIVEKIT_URL=wss://your-project.livekit.cloud
+LIVEKIT_API_KEY=your_api_key
+LIVEKIT_API_SECRET=your_api_secret
+LIVEKIT_SIP_OUTBOUND_TRUNK_ID=ST_xxxxxxxxx
+```
+
+> [!WARNING]
+> Security Notice: Never commit API secrets, private keys, or credentials to version control. Keep them safely stored in `.env.local`.
+
+### How to Run
+
+1. **Start the Outbound Agent Server**:
+   ```bash
+   cd backend
+   uv run python src/telephony/outbound/agent.py dev
+   ```
+
+2. **Initiate an Outbound Call** (in a second terminal):
+   ```bash
+   cd backend
+   uv run python src/telephony/outbound/dial.py --to sonali721
+   ```
+   *(Or shortcut: `uv run python src/outbound_call.py --to sonali721`)*
+
+### Opt-Out Handling & SQLite Memory
+If the farmer asks to stop alerts or says "stop calls" / "don't call me again" / "stop these alerts", KrishiMitra AI:
+- Invokes the `@function_tool` `opt_out_alerts`.
+- Updates SQLite database (`krishimitra.db`) setting `opted_out = 1`.
+- Politely confirms future calls are stopped and ends the conversation cleanly.
+- Future call attempts to an opted-out farmer will automatically be blocked by `dial.py`.
+
+### Troubleshooting
+1. **Linphone does not ring**: Check that Linphone displays "Registered" status and `LIVEKIT_SIP_OUTBOUND_TRUNK_ID` is set in `backend/.env.local`.
+2. **Media Encryption error**: In Linphone Settings → Calls → Advanced calls settings, turn OFF "Media encryption mandatory".
+3. **Missing Trunk ID error**: Add `LIVEKIT_SIP_OUTBOUND_TRUNK_ID=ST_xxxxxxxxx` to `backend/.env.local`.
+4. **Agent connects but does not speak**: Ensure `MURF_API_KEY` is active and valid.
+5. **No answer / busy handling**: The dial script logs the call outcome to SQLite DB (`call_logs`) and terminates without crashing or aggressive retry loops.
+
+---
+
 ## Links
 
 - [Murf API Docs](https://murf.ai/api/docs)

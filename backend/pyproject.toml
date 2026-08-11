@@ -38,7 +38,7 @@ target-version = "py39"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "N", "B", "A", "C4", "UP", "SIM", "RUF"]
-ignore = ["E501"]  # Line too long (handled by formatter)
+ignore = ["E501", "E402"]  # Line too long (handled by formatter), module level import not at top
 
 [tool.ruff.format]
 quote-style = "double"
