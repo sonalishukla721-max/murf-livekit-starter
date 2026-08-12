@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import {
   ArrowRight,
+  BarChart3,
   Bot,
   CheckCircle2,
   FileCheck,
@@ -89,6 +90,16 @@ export function LandingPage() {
               >
                 <a href="#features">Explore Features</a>
               </Button>
+              <Button
+                asChild
+                variant="outline"
+                size="lg"
+                className="border-border hover:bg-muted h-13 rounded-2xl px-7 text-base font-semibold transition-all"
+              >
+                <Link href="/analytics">
+                  <BarChart3 className="mr-2 size-4" /> Analytics
+                </Link>
+              </Button>
             </div>
 
             {/* Quick Metrics */}
@@ -104,6 +115,10 @@ export function LandingPage() {
               <div className="flex items-center gap-2">
                 <Headset className="size-4 text-indigo-500" />
                 <span>Day 7 Human Escalation</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <BarChart3 className="size-4 text-violet-500" />
+                <Link href="/analytics" className="hover:text-foreground underline-offset-2 hover:underline">Day 8 Analytics</Link>
               </div>
             </div>
           </div>
@@ -321,6 +336,26 @@ export function LandingPage() {
                 CVVs are never requested or stored.
               </p>
             </div>
+            {/* Feature 7 — Day 8 Analytics */}
+            <div className="group relative rounded-3xl border border-violet-500/30 bg-violet-500/5 p-7 shadow-sm transition-all hover:-translate-y-1 hover:border-violet-500/60 hover:shadow-xl dark:bg-violet-500/10">
+              <span className="absolute top-4 right-4 rounded-full bg-violet-600 px-2.5 py-0.5 text-[10px] font-bold text-white uppercase">
+                Day 8 Feature
+              </span>
+              <div className="flex size-12 items-center justify-center rounded-2xl bg-violet-500/20 text-violet-600 dark:text-violet-400">
+                <BarChart3 className="size-6" />
+              </div>
+              <h3 className="text-foreground mt-5 text-xl font-bold">Call Analytics Dashboard</h3>
+              <p className="text-muted-foreground mt-2 text-sm leading-relaxed">
+                Real-time call metrics including Total Calls, Successful Calls, and Failed Calls — all
+                sourced directly from the database with zero hardcoded values.
+              </p>
+              <Link
+                href="/analytics"
+                className="mt-4 inline-flex items-center gap-1 text-xs font-semibold text-violet-600 hover:underline dark:text-violet-400"
+              >
+                View Dashboard <ArrowRight className="size-3" />
+              </Link>
+            </div>
           </div>
         </div>
       </section>
@@ -523,6 +558,9 @@ export function LandingPage() {
               </a>
               <Link href="/escalations" className="hover:text-foreground">
                 Human Support
+              </Link>
+              <Link href="/analytics" className="hover:text-foreground">
+                Analytics
               </Link>
               <a href="#privacy" className="hover:text-foreground">
                 Privacy

@@ -26,7 +26,7 @@ export function getDb() {
   const dbPath = getDbPath();
   const db = new DatabaseSync(dbPath);
 
-  // Ensure table exists
+  // Ensure escalations table exists
   db.exec(`
     CREATE TABLE IF NOT EXISTS escalations (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -41,6 +41,23 @@ export function getDb() {
       agent_checks TEXT,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+  `);
+
+  // Ensure calls table exists (created by backend on every session end)
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS calls (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_id TEXT UNIQUE NOT NULL,
+      user_id TEXT DEFAULT 'anonymous',
+      started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      ended_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      duration INTEGER DEFAULT 0,
+      channel TEXT DEFAULT 'browser',
+      outcome TEXT DEFAULT 'FAILED',
+      failure_type TEXT,
+      success INTEGER DEFAULT 0,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
   `);
 
@@ -216,4 +233,56 @@ export function createEscalationRecord(data: {
   }
 
   return created;
+}
+
+// ============================================================
+// CALL ANALYTICS (Day 8)
+// ============================================================
+
+export interface CallRecord {
+  id: number;
+  session_id: string;
+  user_id: string;
+  started_at: string;
+  ended_at: string;
+  duration: number;
+  channel: string;
+  outcome: string;
+  failure_type: string | null;
+  success: number;
+  created_at: string;
+}
+
+export interface CallAnalytics {
+  total_calls: number;
+  successful_calls: number;
+  failed_calls: number;
+  recent_calls: CallRecord[];
+}
+
+export function getCallAnalytics(): CallAnalytics {
+  const db = getDb();
+
+  const totalRow = db.prepare('SELECT COUNT(*) as cnt FROM calls').get() as { cnt: number };
+  const successRow = db.prepare('SELECT COUNT(*) as cnt FROM calls WHERE success = 1').get() as {
+    cnt: number;
+  };
+  const failedRow = db.prepare('SELECT COUNT(*) as cnt FROM calls WHERE success = 0').get() as {
+    cnt: number;
+  };
+
+  const recentRows = db
+    .prepare(
+      'SELECT id, session_id, user_id, started_at, ended_at, duration, channel, outcome, failure_type, success, created_at FROM calls ORDER BY created_at DESC LIMIT 20'
+    )
+    .all() as unknown as CallRecord[];
+
+  db.close();
+
+  return {
+    total_calls: totalRow.cnt,
+    successful_calls: successRow.cnt,
+    failed_calls: failedRow.cnt,
+    recent_calls: recentRows,
+  };
 }

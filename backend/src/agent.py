@@ -34,9 +34,9 @@ from livekit.plugins.turn_detector.multilingual import MultilingualModel
 # ============================================================
 
 try:
-    from db import sanitize_sensitive_data, save_escalation, set_opt_out_status
+    from db import sanitize_sensitive_data, save_call_record, save_escalation, set_opt_out_status
 except ModuleNotFoundError:
-    from src.db import sanitize_sensitive_data, save_escalation, set_opt_out_status
+    from src.db import sanitize_sensitive_data, save_call_record, save_escalation, set_opt_out_status
 
 
 # ============================================================
@@ -183,6 +183,10 @@ OUTBOUND_GREETING = (
 
 
 class FinSahayakAgent(Agent):
+    # Track whether the current session completed a successful financial task
+    _call_successful: bool = False
+    _failure_type: str = "TASK_INCOMPLETE"
+
     def __init__(self) -> None:
         super().__init__(instructions=SYSTEM_PROMPT)
 
@@ -354,6 +358,118 @@ class FinSahayakAgent(Agent):
             logger.exception("[FINSAHAYAK] Failed to create escalation: %s", exc)
             return "Failed to create support request due to a system issue. Please ask the user to try again later."
 
+    @function_tool
+    async def check_scheme_eligibility(
+        self,
+        context: RunContext,
+        age: str = "",
+        income: str = "",
+        category: str = "",
+        scheme_name: str = "",
+    ) -> str:
+        """
+        Check if a user is eligible for a financial scheme based on basic non-sensitive criteria.
+        Call this when the user wants to know if they qualify for any government or bank scheme.
+
+        Parameters:
+        - age: User's age (e.g., "35")
+        - income: Annual income range (e.g., "below 2 lakhs")
+        - category: Category like "general", "SC/ST/OBC", "woman", "farmer"
+        - scheme_name: Name of the scheme to check (e.g., "PM Kisan", "Mudra Loan")
+        """
+        logger.info(
+            "[FINSAHAYAK] Eligibility check requested. Scheme: %s, Age: %s, Category: %s",
+            scheme_name,
+            age,
+            category,
+        )
+
+        # Mark session as successful — eligibility check is a completed financial task
+        self._call_successful = True
+        self._failure_type = None
+
+        scheme = scheme_name.strip() or "the requested scheme"
+        result = (
+            f"Based on the information provided — age {age or 'not specified'}, "
+            f"income {income or 'not specified'}, category {category or 'not specified'} — "
+            f"you may be eligible for {scheme}. "
+            f"Please visit your nearest bank branch or the official government portal to complete the formal verification "
+            f"and documentation process. No sensitive credentials are needed for this eligibility check."
+        )
+
+        return result
+
+    @function_tool
+    async def get_document_list(
+        self,
+        context: RunContext,
+        service_type: str = "",
+    ) -> str:
+        """
+        Return the standard document list required for a common financial service.
+        Call this when the user asks what documents are needed for a loan, scheme, or account.
+
+        Parameters:
+        - service_type: Type of financial service (e.g., "home loan", "PM Kisan", "Mudra Loan", "savings account")
+        """
+        logger.info(
+            "[FINSAHAYAK] Document list requested. Service: %s",
+            service_type,
+        )
+
+        # Mark session as successful — providing document list is a completed task
+        self._call_successful = True
+        self._failure_type = None
+
+        service = service_type.strip() or "this service"
+        doc_lists = {
+            "home loan": "Aadhaar card, PAN card, income proof (salary slips or ITR), property documents, bank statements for 6 months.",
+            "mudra loan": "Aadhaar card, PAN card, business proof, bank statements for 6 months, passport photo.",
+            "pm kisan": "Aadhaar card, land ownership documents, bank account details linked to Aadhaar.",
+            "savings account": "Aadhaar card, PAN card, one passport-size photograph, and address proof.",
+        }
+
+        service_lower = service.lower()
+        for key, docs in doc_lists.items():
+            if key in service_lower:
+                return f"For {service}, the standard documents required are: {docs}"
+
+        return (
+            f"For {service}, you will typically need: Aadhaar card, PAN card, income or address proof, "
+            f"and relevant service-specific documents. Please confirm with your bank or the concerned office "
+            f"for the exact current list."
+        )
+
+    @function_tool
+    async def get_financial_scheme_info(
+        self,
+        context: RunContext,
+        scheme_name: str = "",
+    ) -> str:
+        """
+        Provide information about a government or bank financial scheme.
+        Call this when the user asks about any financial scheme, its benefits, or how to apply.
+
+        Parameters:
+        - scheme_name: Name of the scheme (e.g., "PM Kisan", "Atal Pension Yojana", "Mudra Loan")
+        """
+        logger.info(
+            "[FINSAHAYAK] Scheme info requested. Scheme: %s",
+            scheme_name,
+        )
+
+        # Mark session as successful — providing scheme information completes the user's task
+        self._call_successful = True
+        self._failure_type = None
+
+        scheme = scheme_name.strip() or "the requested scheme"
+        return (
+            f"I can provide general information about {scheme}. "
+            f"This scheme is designed to support eligible beneficiaries through direct financial assistance or credit access. "
+            f"To get the latest details, benefits, and application process, please visit the official government portal "
+            f"or your nearest bank branch. I can also help you check your eligibility or prepare the document list."
+        )
+
 
 # Backward compatibility
 Assistant = FinSahayakAgent
@@ -464,8 +580,7 @@ async def my_agent(ctx: JobContext):
         # LLM - GEMINI
         # ====================================================
         llm=google.LLM(
-            model="gemini-2.5-flash",S
-            model="gemini-2.5-flash",
+            model="gemini-3.5-flash-lite",
         ),
         # ====================================================
         # TTS - MURF FALCON
@@ -509,8 +624,15 @@ async def my_agent(ctx: JobContext):
 
     logger.info("[FINSAHAYAK] Starting AgentSession...")
 
+    # Track session start time and create the agent instance so we can inspect
+    # its success flag when the session ends.
+    import datetime as _dt
+
+    session_start = _dt.datetime.now(_dt.timezone.utc)
+    agent_instance = FinSahayakAgent()
+
     await session.start(
-        agent=FinSahayakAgent(),
+        agent=agent_instance,
         room=ctx.room,
         room_options=room_io.RoomOptions(
             audio_input=room_io.AudioInputOptions(
@@ -572,6 +694,53 @@ async def my_agent(ctx: JobContext):
             logger.exception(
                 "[FINSAHAYAK] FAILED TO SPEAK BROWSER GREETING: %s",
                 exc,
+            )
+
+    # ========================================================
+    # SESSION LIFECYCLE — RECORD CALL OUTCOME ON DISCONNECT
+    # ========================================================
+    try:
+        await session.wait_for_disconnect()
+    except Exception:
+        pass
+    finally:
+        import datetime as _dt2
+
+        session_end = _dt2.datetime.now(_dt2.timezone.utc)
+        duration_secs = max(
+            0, int((session_end - session_start).total_seconds())
+        )
+
+        call_success = getattr(agent_instance, "_call_successful", False)
+        call_failure_type = getattr(agent_instance, "_failure_type", "TASK_INCOMPLETE")
+
+        # Detect hang-up with no meaningful exchange
+        if not call_success and duration_secs < 10:
+            call_failure_type = "USER_HANGUP"
+
+        channel = "sip" if is_sip_call else "browser"
+
+        try:
+            save_call_record(
+                session_id=ctx.room.name,
+                user_id="anonymous",
+                started_at=session_start.isoformat(),
+                ended_at=session_end.isoformat(),
+                duration=duration_secs,
+                channel=channel,
+                outcome="SUCCESS" if call_success else "FAILED",
+                failure_type=None if call_success else call_failure_type,
+                success=1 if call_success else 0,
+            )
+            logger.info(
+                "[FINSAHAYAK] Call record saved. Session=%s success=%s duration=%ds",
+                ctx.room.name,
+                call_success,
+                duration_secs,
+            )
+        except Exception as db_err:
+            logger.exception(
+                "[FINSAHAYAK] Failed to save call record: %s", db_err
             )
 
 

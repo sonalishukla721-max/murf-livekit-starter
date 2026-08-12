@@ -89,6 +89,24 @@ def init_db():
         """
     )
 
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS calls (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT UNIQUE NOT NULL,
+            user_id TEXT DEFAULT 'anonymous',
+            started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            ended_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            duration INTEGER DEFAULT 0,
+            channel TEXT DEFAULT 'browser',
+            outcome TEXT DEFAULT 'FAILED',
+            failure_type TEXT,
+            success INTEGER DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+
     # Seed default demo farmer if table is empty
     cursor.execute("SELECT COUNT(*) FROM farmers")
     if cursor.fetchone()[0] == 0:
@@ -385,6 +403,97 @@ def get_escalation_stats() -> dict:
     }
 
 
+def save_call_record(
+    session_id: str,
+    user_id: str = "anonymous",
+    started_at: str = None,
+    ended_at: str = None,
+    duration: int = 0,
+    channel: str = "browser",
+    outcome: str = "FAILED",
+    failure_type: str = None,
+    success: int = 0,
+) -> dict:
+    init_db()
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    if not started_at:
+        started_at = now
+    if not ended_at:
+        ended_at = now
+
+    success_val = 1 if (success or outcome == "SUCCESS") else 0
+    outcome_val = "SUCCESS" if success_val == 1 else "FAILED"
+    failure_val = None if success_val == 1 else (failure_type or "TASK_INCOMPLETE")
+
+    cursor.execute(
+        """
+        INSERT OR REPLACE INTO calls (session_id, user_id, started_at, ended_at, duration, channel, outcome, failure_type, success, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            session_id,
+            user_id,
+            started_at,
+            ended_at,
+            duration,
+            channel,
+            outcome_val,
+            failure_val,
+            success_val,
+            now,
+        ),
+    )
+    conn.commit()
+    call_id = cursor.lastrowid
+    conn.close()
+
+    return {
+        "id": call_id,
+        "session_id": session_id,
+        "user_id": user_id,
+        "started_at": started_at,
+        "ended_at": ended_at,
+        "duration": duration,
+        "channel": channel,
+        "outcome": outcome_val,
+        "failure_type": failure_val,
+        "success": success_val,
+    }
+
+
+def get_call_analytics() -> dict:
+    init_db()
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT COUNT(*) as cnt FROM calls")
+    total_calls = cursor.fetchone()["cnt"]
+
+    cursor.execute("SELECT COUNT(*) as cnt FROM calls WHERE success = 1")
+    successful_calls = cursor.fetchone()["cnt"]
+
+    cursor.execute("SELECT COUNT(*) as cnt FROM calls WHERE success = 0")
+    failed_calls = cursor.fetchone()["cnt"]
+
+    cursor.execute(
+        "SELECT id, session_id, user_id, started_at, ended_at, duration, channel, outcome, failure_type, success, created_at FROM calls ORDER BY created_at DESC LIMIT 20"
+    )
+    recent_calls = [dict(row) for row in cursor.fetchall()]
+
+    conn.close()
+
+    return {
+        "total_calls": total_calls,
+        "successful_calls": successful_calls,
+        "failed_calls": failed_calls,
+        "recent_calls": recent_calls,
+    }
+
+
 if __name__ == "__main__":
     init_db()
     print("Database initialized successfully.")
+
