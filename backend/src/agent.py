@@ -1,6 +1,10 @@
 import asyncio
+import json
 import logging
 import os
+import random
+import urllib.request
+from datetime import datetime
 
 from dotenv import load_dotenv
 from livekit import rtc
@@ -25,15 +29,14 @@ from livekit.plugins import (
 )
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
-
 # ============================================================
 # DATABASE
 # ============================================================
 
 try:
-    from db import set_opt_out_status
+    from db import sanitize_sensitive_data, save_escalation, set_opt_out_status
 except ModuleNotFoundError:
-    from src.db import set_opt_out_status
+    from src.db import sanitize_sensitive_data, save_escalation, set_opt_out_status
 
 
 # ============================================================
@@ -64,90 +67,101 @@ load_dotenv(".env")
 # ============================================================
 
 SYSTEM_PROMPT = """
-You are FinSahayak, a friendly and helpful AI financial services
-voice assistant.
+You are FinSahayak, a friendly, intelligent, and trustworthy AI financial services assistant.
+
+Tagline: "Smart Financial Guidance. Human Help When It Matters."
 
 Your track is Financial Services.
 
 You help customers with:
-- financial scheme reminders
-- eligibility reminders
-- important financial deadlines
-- general financial information
-- simple financial guidance
+- answering financial questions (savings accounts, EMIs, loans, fixed deposits, interest rates, schemes)
+- providing clear financial guidance and eligibility reminders
+- detecting situations requiring human expert assistance
+- creating human support requests when authorized by the user
 
 You can communicate in:
 - English
 - Hindi
 - Hinglish
 
-VOICE RULES:
+VOICE & RESPONSE RULES:
 
-1. Always be polite, friendly, concise, and clear.
-
+1. Always be polite, concise, professional, and clear.
 2. Your responses are spoken aloud.
-   Do not use markdown, bullet points, emojis, tables, or special formatting.
-
+   Do not use markdown formatting (no bolding, asterisks, bullet points, emojis, or tables).
 3. Keep normal responses short, usually one to three conversational sentences.
+4. Automatically adapt to the user's language. Respond in Hindi/Hinglish if spoken to in Hindi, or English if in English.
+5. You are an AI assistant. Never pretend to be a human, bank employee, or official financial advisor.
+6. Never ask for sensitive financial credentials:
+   - OTP
+   - UPI PIN / ATM PIN
+   - CVV
+   - passwords
+   - bank login credentials
+   - full card or account numbers
+7. If the user mentions sensitive details, politely remind them that you do not need those credentials.
+8. Do not provide personalized investment advice or promise guaranteed returns.
 
-4. Automatically adapt to the user's language.
-   If the user speaks Hindi, respond naturally in Hindi or Hinglish.
-   If the user speaks English, respond in English.
+DAY 7 — HUMAN ESCALATION GUIDELINES:
 
-5. You are an AI assistant.
-   Never pretend to be a human, bank employee, government employee,
-   or official financial advisor.
+You must recognize situations that require human review:
 
-6. Never ask for sensitive financial information.
-
-Never ask for:
-- OTP
-- UPI PIN
-- ATM PIN
-- CVV
-- password
-- bank login credentials
-- full card number
-
-7. If the user asks for sensitive information to be shared,
-   clearly explain that you do not need that information.
-
-8. Do not provide personalized investment advice.
-   You may provide general financial information.
-
-9. Do not promise financial returns.
-
-10. For outbound calls, clearly explain who you are and why you are calling.
-
-11. If the user asks to stop calls or reminders, immediately call
-    the opt_out_alerts tool.
-
+SCENARIO A — POSSIBLE FRAUD:
 Examples:
+- "I see a transaction I did not make."
+- "Someone used my account."
+- "I think someone has accessed my account."
+- "I don't recognize this payment."
+- "This transaction isn't mine."
 
-"stop calling me"
-"don't call me again"
-"stop these calls"
-"I don't want these reminders"
-"remove me"
-"mujhe call mat karna"
-"calls band karo"
-"mujhe ye alerts nahi chahiye"
+SCENARIO B — COMPLEX FINANCIAL CASE:
+Examples:
+- "I have a complicated loan issue."
+- "I need someone to review my case."
+- "I want to speak to a human."
+- "The AI cannot solve my financial problem."
+- "My case requires a decision."
 
-12. After the opt-out tool is called:
-    - acknowledge the request
-    - confirm politely
-    - say goodbye
-    - do not continue the conversation
+NORMAL CONVERSATIONS MUST NOT ESCALATE:
+Examples:
+- "What is a savings account?"
+- "What is EMI?"
+- "How does a fixed deposit work?"
+- "What documents are needed for a loan?"
+- "What is compound interest?"
+Answer these normally. Do NOT offer or create an escalation for normal questions.
 
-13. The Day 6 outbound use case is a financial scheme deadline reminder.
+MANDATORY PERMISSION PROTOCOL:
+When an escalation scenario (Possible Fraud or Complex Case) is detected:
+1. Explain politely that the situation may require human review.
+2. Tell the user what information will be included: user name, short summary of the issue, urgency level, language, and preferred follow-up method.
+3. Explicitly state that NO sensitive credentials (passwords, PINs, OTPs, CVVs) will be stored or shared.
+4. ASK FOR EXPLICIT CONSENT BEFORE CALLING THE TOOL.
+   Example phrase:
+   "I understand. This situation may need human review. I can create a support request with your name, a short description of the issue, urgency, language, and preferred follow-up method. I will not include passwords, PINs, OTPs, CVVs, or unnecessary sensitive information. Would you like me to create this request?"
 
-14. If information is demo/local data, do not falsely describe it as
-    live or officially verified information.
+5. IF THE USER SAYS YES:
+   Call the `create_escalation` tool immediately with:
+   - user_name: caller's name or "Valued Customer"
+   - issue_type: "Possible Fraud" or "Complex Financial Case"
+   - summary: concise summary of the reported problem
+   - urgency: "high" for fraud, "medium" for complex cases
+   - language: language of interaction (e.g., "English", "Hindi")
+   - preferred_followup: "Phone" or "Email"
 
-15. Never pressure the customer to take a financial action.
+   After the tool returns, inform the user:
+   "Your support request has been created. Your reference ID is [Reference ID]. The request is currently open. A human support representative will review your case using this reference ID."
+
+6. IF THE USER SAYS NO:
+   Do NOT call `create_escalation`.
+   Respond: "Understood. I won't create or share a support request."
+
+OUTBOUND CALL RULES:
+1. Clearly explain who you are and why you are calling.
+2. If the user asks to stop calls or reminders, immediately call `opt_out_alerts`.
 
 Your name is FinSahayak.
-You are a safe, concise Financial Services AI voice assistant.
+You are a safe, concise, and trustworthy Financial Services AI voice assistant.
 """
 
 
@@ -167,12 +181,10 @@ OUTBOUND_GREETING = (
 # FINSAHAYAK AGENT
 # ============================================================
 
-class FinSahayakAgent(Agent):
 
+class FinSahayakAgent(Agent):
     def __init__(self) -> None:
-        super().__init__(
-            instructions=SYSTEM_PROMPT
-        )
+        super().__init__(instructions=SYSTEM_PROMPT)
 
     @function_tool
     async def opt_out_alerts(
@@ -195,9 +207,7 @@ class FinSahayakAgent(Agent):
                 opted_out=True,
             )
 
-            logger.info(
-                "[FINSAHAYAK] Opt-out successfully saved."
-            )
+            logger.info("[FINSAHAYAK] Opt-out successfully saved.")
 
         except Exception as exc:
             logger.exception(
@@ -210,6 +220,139 @@ class FinSahayakAgent(Agent):
             "Tell the customer politely that future reminder calls "
             "will be stopped, then say goodbye."
         )
+
+    @function_tool
+    async def create_escalation(
+        self,
+        context: RunContext,
+        user_name: str = "Valued Customer",
+        issue_type: str = "Possible Fraud",
+        summary: str = "",
+        urgency: str = "high",
+        language: str = "English",
+        preferred_followup: str = "Phone",
+    ) -> str:
+        """
+        Create a human support request when a financial situation requires human review
+        and the user has given explicit permission.
+
+        Parameters:
+        - user_name: Name of the customer (default "Valued Customer")
+        - issue_type: "Possible Fraud" or "Complex Financial Case"
+        - summary: Brief summary of what happened
+        - urgency: "high", "medium", "low", or "emergency"
+        - language: Preferred interaction language ("English", "Hindi")
+        - preferred_followup: "Phone" or "Email"
+        """
+        logger.info(
+            "[FINSAHAYAK] Creating escalation request. Issue: %s, User: %s",
+            issue_type,
+            user_name,
+        )
+
+        try:
+            # Generate reference ID dynamically: FIN-{YEAR}-{4 DIGITS}
+            year = datetime.now().year
+            rand_digits = random.randint(1000, 9999)
+            reference_id = f"FIN-{year}-{rand_digits}"
+
+            # Save escalation into database with sanitization
+            res = save_escalation(
+                user_name=user_name,
+                issue_type=issue_type,
+                summary=summary,
+                urgency=urgency,
+                language=language,
+                preferred_followup=preferred_followup,
+                reference_id=reference_id,
+            )
+
+            ref_id = res.get("reference_id", reference_id)
+            logger.info(
+                "[FINSAHAYAK] Escalation created successfully with Ref ID: %s", ref_id
+            )
+
+            # Optional Discord Webhook notification
+            webhook_url = os.environ.get("DISCORD_WEBHOOK_URL")
+            if webhook_url:
+                try:
+                    sanitized_sum = sanitize_sensitive_data(summary)
+                    payload = {
+                        "embeds": [
+                            {
+                                "title": "🚨 FinSahayak Human Support Request",
+                                "color": 15158332
+                                if urgency in ["high", "emergency"]
+                                else 3447003,
+                                "fields": [
+                                    {
+                                        "name": "Reference ID",
+                                        "value": ref_id,
+                                        "inline": True,
+                                    },
+                                    {
+                                        "name": "Issue Type",
+                                        "value": issue_type,
+                                        "inline": True,
+                                    },
+                                    {
+                                        "name": "Urgency",
+                                        "value": urgency.upper(),
+                                        "inline": True,
+                                    },
+                                    {
+                                        "name": "User",
+                                        "value": user_name,
+                                        "inline": True,
+                                    },
+                                    {
+                                        "name": "Language",
+                                        "value": language,
+                                        "inline": True,
+                                    },
+                                    {
+                                        "name": "Follow-up",
+                                        "value": preferred_followup,
+                                        "inline": True,
+                                    },
+                                    {
+                                        "name": "Summary",
+                                        "value": sanitized_sum
+                                        or "Human review requested.",
+                                    },
+                                ],
+                                "timestamp": datetime.utcnow().isoformat(),
+                            }
+                        ]
+                    }
+                    data = json.dumps(payload).encode("utf-8")
+                    req = urllib.request.Request(
+                        webhook_url,
+                        data=data,
+                        headers={
+                            "Content-Type": "application/json",
+                            "User-Agent": "FinSahayak-AI",
+                        },
+                    )
+                    urllib.request.urlopen(req, timeout=3)
+                    logger.info(
+                        "[FINSAHAYAK] Discord webhook notification sent for %s", ref_id
+                    )
+                except Exception as w_err:
+                    logger.warning(
+                        "[FINSAHAYAK] Could not send Discord webhook: %s", w_err
+                    )
+
+            return (
+                f"Support request created successfully. "
+                f"Reference ID: {ref_id}. Status: open. "
+                f"Inform the customer that their reference ID is {ref_id} "
+                f"and a human representative will review the case."
+            )
+
+        except Exception as exc:
+            logger.exception("[FINSAHAYAK] Failed to create escalation: %s", exc)
+            return "Failed to create support request due to a system issue. Please ask the user to try again later."
 
 
 # Backward compatibility
@@ -227,6 +370,7 @@ server = AgentServer()
 # PREWARM
 # ============================================================
 
+
 def prewarm(proc: JobProcess):
     logger.info("[FINSAHAYAK] Loading Silero VAD...")
 
@@ -242,6 +386,7 @@ server.setup_fnc = prewarm
 # MAIN AGENT SESSION
 # ============================================================
 
+
 @server.rtc_session(agent_name="my-agent")
 async def my_agent(ctx: JobContext):
 
@@ -251,9 +396,7 @@ async def my_agent(ctx: JobContext):
         "track": "Financial Services",
     }
 
-    logger.info(
-        "[FINSAHAYAK] Starting session."
-    )
+    logger.info("[FINSAHAYAK] Starting session.")
 
     logger.info(
         "[FINSAHAYAK] Room: %s",
@@ -264,146 +407,90 @@ async def my_agent(ctx: JobContext):
     # CONNECT TO LIVEKIT FIRST
     # ========================================================
 
-    logger.info(
-        "[FINSAHAYAK] Connecting to LiveKit room..."
-    )
+    logger.info("[FINSAHAYAK] Connecting to LiveKit room...")
 
     await ctx.connect()
 
-    logger.info(
-        "[FINSAHAYAK] Connected to LiveKit room."
-    )
+    logger.info("[FINSAHAYAK] Connected to LiveKit room.")
 
     # ========================================================
-    # WAIT FOR SIP PARTICIPANT
+    # DETECT SIP PARTICIPANT WITHOUT BLOCKING BROWSER SESSIONS
     # ========================================================
 
+    # IMPORTANT: Do NOT wait 30 seconds for a SIP participant here.
+    # Browser sessions do not have a SIP participant, and blocking here
+    # delays AgentSession startup enough to make the frontend report:
+    # "Agent joined the room but did not complete initializing."
     is_sip_call = False
     sip_participant = None
 
-    # Check existing remote participants
     for participant in ctx.room.remote_participants.values():
-
         logger.info(
             "[FINSAHAYAK] Remote participant detected: %s | kind=%s",
             participant.identity,
             participant.kind,
         )
 
-        if (
-            participant.kind
-            == rtc.ParticipantKind.PARTICIPANT_KIND_SIP
-        ):
+        if participant.kind == rtc.ParticipantKind.PARTICIPANT_KIND_SIP:
             sip_participant = participant
             is_sip_call = True
-
             logger.info(
                 "[FINSAHAYAK] SIP participant already present: %s",
                 participant.identity,
             )
-
             break
 
-    # If SIP participant isn't there yet, wait for it
-    if sip_participant is None:
-
+    if not is_sip_call:
         logger.info(
-            "[FINSAHAYAK] Waiting for SIP participant..."
+            "[FINSAHAYAK] No SIP participant currently present; "
+            "starting as browser/inbound session immediately."
         )
-
-        try:
-
-            sip_participant = await asyncio.wait_for(
-                ctx.wait_for_participant(
-                    kind=rtc.ParticipantKind.PARTICIPANT_KIND_SIP
-                ),
-                timeout=30.0,
-            )
-
-            is_sip_call = True
-
-            logger.info(
-                "[FINSAHAYAK] SIP participant joined: %s",
-                sip_participant.identity,
-            )
-
-        except asyncio.TimeoutError:
-
-            logger.info(
-                "[FINSAHAYAK] No SIP participant detected."
-            )
-
-            is_sip_call = False
-
-        except Exception as exc:
-
-            logger.exception(
-                "[FINSAHAYAK] Error waiting for SIP participant: %s",
-                exc,
-            )
 
     # ========================================================
     # CREATE VOICE SESSION
     # ========================================================
 
-    logger.info(
-        "[FINSAHAYAK] Creating voice pipeline..."
-    )
+    logger.info("[FINSAHAYAK] Creating voice pipeline...")
 
     session = AgentSession(
-
         # ====================================================
         # STT - DEEPGRAM
         # ====================================================
-
         stt=deepgram.STT(
             model="nova-3",
             language="multi",
         ),
-
         # ====================================================
         # LLM - GEMINI
         # ====================================================
-
         llm=google.LLM(
-            model="gemini-3.5-flash-lite",
+            model="gemini-2.5-flash",S
+            model="gemini-2.5-flash",
         ),
-
         # ====================================================
         # TTS - MURF FALCON
         # ====================================================
-
         tts=murf.TTS(
             voice="Anisha",
             style="Conversation",
-            tokenizer=tokenize.basic.SentenceTokenizer(
-                min_sentence_len=2
-            ),
+            tokenizer=tokenize.basic.SentenceTokenizer(min_sentence_len=2),
             text_pacing=True,
         ),
-
         # ====================================================
         # TURN DETECTION
         # ====================================================
-
         turn_detection=MultilingualModel(),
-
         # ====================================================
         # VAD
         # ====================================================
-
         vad=ctx.proc.userdata["vad"],
-
         # ====================================================
         # PREEMPTIVE GENERATION
         # ====================================================
-
         preemptive_generation=True,
     )
 
-    logger.info(
-        "[FINSAHAYAK] Voice pipeline created."
-    )
+    logger.info("[FINSAHAYAK] Voice pipeline created.")
 
     # ========================================================
     # ERROR HANDLER
@@ -420,16 +507,13 @@ async def my_agent(ctx: JobContext):
     # SESSION START
     # ========================================================
 
-    logger.info(
-        "[FINSAHAYAK] Starting AgentSession..."
-    )
+    logger.info("[FINSAHAYAK] Starting AgentSession...")
 
     await session.start(
         agent=FinSahayakAgent(),
         room=ctx.room,
         room_options=room_io.RoomOptions(
             audio_input=room_io.AudioInputOptions(
-
                 noise_cancellation=lambda params: (
                     noise_cancellation.BVCTelephony()
                     if (
@@ -438,31 +522,22 @@ async def my_agent(ctx: JobContext):
                     )
                     else noise_cancellation.BVC()
                 ),
-
             ),
         ),
     )
 
-    logger.info(
-        "[FINSAHAYAK] AgentSession started successfully."
-    )
+    logger.info("[FINSAHAYAK] AgentSession started successfully.")
 
     # ========================================================
     # OUTBOUND GREETING
     # ========================================================
 
     if is_sip_call:
+        logger.info("[FINSAHAYAK] SIP outbound call detected.")
 
-        logger.info(
-            "[FINSAHAYAK] SIP outbound call detected."
-        )
-
-        logger.info(
-            "[FINSAHAYAK] Sending greeting through Murf Falcon..."
-        )
+        logger.info("[FINSAHAYAK] Sending greeting through Murf Falcon...")
 
         try:
-
             # IMPORTANT:
             # session.say() uses the configured Murf TTS.
             #
@@ -474,24 +549,30 @@ async def my_agent(ctx: JobContext):
                 allow_interruptions=False,
             )
 
-            logger.info(
-                "[FINSAHAYAK] Outbound greeting completed."
-            )
+            logger.info("[FINSAHAYAK] Outbound greeting completed.")
 
         except Exception as exc:
-
             logger.exception(
                 "[FINSAHAYAK] FAILED TO SPEAK GREETING: %s",
                 exc,
             )
 
     else:
+        logger.info("[FINSAHAYAK] Browser/inbound session.")
 
-        logger.info(
-            "[FINSAHAYAK] Browser/inbound session."
-        )
-
-        # Browser users can start the conversation normally.
+        # Give browser users an immediate spoken greeting. This also
+        # verifies that the Murf TTS output is published to the room.
+        try:
+            await session.say(
+                "Hello, this is FinSahayak. I am ready to help you with your financial questions. How can I help you today?",
+                allow_interruptions=True,
+            )
+            logger.info("[FINSAHAYAK] Browser greeting completed.")
+        except Exception as exc:
+            logger.exception(
+                "[FINSAHAYAK] FAILED TO SPEAK BROWSER GREETING: %s",
+                exc,
+            )
 
 
 # ============================================================

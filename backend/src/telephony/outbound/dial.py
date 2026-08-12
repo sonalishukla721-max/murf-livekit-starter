@@ -9,7 +9,6 @@ import uuid
 from dotenv import load_dotenv
 from livekit import api
 
-
 # ============================================================
 # PATH SETUP
 # ============================================================
@@ -67,6 +66,15 @@ AGENT_NAME = "my-agent"
 # SIP DESTINATION
 # ============================================================
 
+
+def normalize_sip_destination(
+    to_arg: str,
+    default_domain: str = "sip.linphone.org",
+) -> str:
+    sip_dest, _ = parse_sip_destination(to_arg, default_domain)
+    return sip_dest
+
+
 def parse_sip_destination(
     to_arg: str,
     default_domain: str = "sip.linphone.org",
@@ -111,6 +119,7 @@ def parse_sip_destination(
 # ============================================================
 # OUTBOUND CALL
 # ============================================================
+
 
 async def make_outbound_call(destination_arg: str):
 
@@ -158,9 +167,7 @@ async def make_outbound_call(destination_arg: str):
     # --------------------------------------------------------
 
     try:
-        sip_destination, sip_user = parse_sip_destination(
-            destination_arg
-        )
+        sip_destination, sip_user = parse_sip_destination(destination_arg)
     except ValueError as exc:
         logger.error("Invalid SIP destination: %s", exc)
         sys.exit(1)
@@ -172,8 +179,7 @@ async def make_outbound_call(destination_arg: str):
     try:
         if is_opted_out(sip_destination):
             logger.warning(
-                "[OUTBOUND] %s has opted out. "
-                "Call will NOT be placed.",
+                "[OUTBOUND] %s has opted out. Call will NOT be placed.",
                 sip_destination,
             )
             return
@@ -187,22 +193,15 @@ async def make_outbound_call(destination_arg: str):
     # Create unique room
     # --------------------------------------------------------
 
-    room_name = (
-        f"outbound-finance-alert-"
-        f"{uuid.uuid4().hex[:8]}"
-    )
+    room_name = f"outbound-finance-alert-{uuid.uuid4().hex[:8]}"
 
     # --------------------------------------------------------
     # Logging
     # --------------------------------------------------------
 
     logger.info("=" * 60)
-    logger.info(
-        "[OUTBOUND] Starting FinSahayak outbound call"
-    )
-    logger.info(
-        "[OUTBOUND] Track: Financial Services"
-    )
+    logger.info("[OUTBOUND] Starting FinSahayak outbound call")
+    logger.info("[OUTBOUND] Track: Financial Services")
     logger.info(
         "[OUTBOUND] Destination: %s",
         sip_destination,
@@ -217,12 +216,7 @@ async def make_outbound_call(destination_arg: str):
     )
     logger.info(
         "[OUTBOUND] Trunk: %s",
-        (
-            f"{trunk_id[:6]}..."
-            f"{trunk_id[-4:]}"
-            if len(trunk_id) > 10
-            else trunk_id
-        ),
+        (f"{trunk_id[:6]}...{trunk_id[-4:]}" if len(trunk_id) > 10 else trunk_id),
     )
     logger.info(
         "[OUTBOUND] Room: %s",
@@ -252,40 +246,30 @@ async def make_outbound_call(destination_arg: str):
     # ========================================================
 
     try:
-
         async with api.LiveKitAPI(
             url=livekit_url,
             api_key=api_key,
             api_secret=api_secret,
         ) as lkapi:
-
             # =================================================
             # STEP 1 — DISPATCH FINSAHAYAK
             # =================================================
 
-            logger.info(
-                "[OUTBOUND] Dispatching FinSahayak worker..."
-            )
+            logger.info("[OUTBOUND] Dispatching FinSahayak worker...")
 
             dispatch_request = api.CreateAgentDispatchRequest(
                 agent_name=AGENT_NAME,
                 room=room_name,
-               metadata = (
-                  '{"track":"financial_services",'
-                  '"call_type":"scheme_deadline_reminder",'
-                  '"sip_user":"' + sip_user + '"}'  
+                metadata=(
+                    '{"track":"financial_services",'
+                    '"call_type":"scheme_deadline_reminder",'
+                    '"sip_user":"' + sip_user + '"}'
                 ),
             )
 
-            dispatch = (
-                await lkapi.agent_dispatch.create_dispatch(
-                    dispatch_request
-                )
-            )
+            dispatch = await lkapi.agent_dispatch.create_dispatch(dispatch_request)
 
-            logger.info(
-                "[OUTBOUND] Agent dispatch created ✓"
-            )
+            logger.info("[OUTBOUND] Agent dispatch created ✓")
 
             logger.info(
                 "[OUTBOUND] Dispatch ID: %s",
@@ -302,9 +286,7 @@ async def make_outbound_call(destination_arg: str):
             # STEP 2 — CREATE SIP PARTICIPANT
             # =================================================
 
-            logger.info(
-                "[OUTBOUND] Creating SIP participant..."
-            )
+            logger.info("[OUTBOUND] Creating SIP participant...")
 
             sip_request = api.CreateSIPParticipantRequest(
                 sip_trunk_id=trunk_id,
@@ -315,19 +297,13 @@ async def make_outbound_call(destination_arg: str):
                 wait_until_answered=True,
             )
 
-            participant_info = (
-                await lkapi.sip.create_sip_participant(
-                    sip_request
-                )
-            )
+            participant_info = await lkapi.sip.create_sip_participant(sip_request)
 
             # =================================================
             # STEP 3 — CALL ANSWERED
             # =================================================
 
-            logger.info(
-                "[OUTBOUND] Call answered ✓"
-            )
+            logger.info("[OUTBOUND] Call answered ✓")
 
             logger.info(
                 "[OUTBOUND] SIP Participant ID: %s",
@@ -339,13 +315,9 @@ async def make_outbound_call(destination_arg: str):
                 room_name,
             )
 
-            logger.info(
-                "[OUTBOUND] FinSahayak should now be connected."
-            )
+            logger.info("[OUTBOUND] FinSahayak should now be connected.")
 
-            logger.info(
-                "[OUTBOUND] Waiting for agent + SIP audio..."
-            )
+            logger.info("[OUTBOUND] Waiting for agent + SIP audio...")
 
             # -------------------------------------------------
             # Log answered
@@ -356,10 +328,7 @@ async def make_outbound_call(destination_arg: str):
                     room_name,
                     sip_destination,
                     "answered",
-                    notes=(
-                        "SIP participant: "
-                        f"{participant_info.participant_id}"
-                    ),
+                    notes=(f"SIP participant: {participant_info.participant_id}"),
                 )
             except Exception as exc:
                 logger.warning(
@@ -373,12 +342,9 @@ async def make_outbound_call(destination_arg: str):
 
             await asyncio.sleep(5)
 
-            logger.info(
-                "[OUTBOUND] Outbound call setup complete."
-            )
+            logger.info("[OUTBOUND] Outbound call setup complete.")
 
     except Exception as err:
-
         error_message = str(err)
 
         logger.error(
@@ -387,25 +353,13 @@ async def make_outbound_call(destination_arg: str):
         )
 
         if "busy" in error_message.lower():
-            logger.error(
-                "[OUTBOUND] Linphone reported BUSY."
-            )
+            logger.error("[OUTBOUND] Linphone reported BUSY.")
 
-        elif (
-            "no answer" in error_message.lower()
-            or "timeout" in error_message.lower()
-        ):
-            logger.error(
-                "[OUTBOUND] No answer from Linphone."
-            )
+        elif "no answer" in error_message.lower() or "timeout" in error_message.lower():
+            logger.error("[OUTBOUND] No answer from Linphone.")
 
-        elif (
-            "not found" in error_message.lower()
-            or "404" in error_message
-        ):
-            logger.error(
-                "[OUTBOUND] SIP user not found."
-            )
+        elif "not found" in error_message.lower() or "404" in error_message:
+            logger.error("[OUTBOUND] SIP user not found.")
 
         with contextlib.suppress(Exception):
             log_call(
@@ -422,30 +376,23 @@ async def make_outbound_call(destination_arg: str):
 # CLI
 # ============================================================
 
+
 def main():
 
     parser = argparse.ArgumentParser(
-        description=(
-            "FinSahayak outbound Financial Services "
-            "SIP caller."
-        )
+        description=("FinSahayak outbound Financial Services SIP caller.")
     )
 
     parser.add_argument(
         "--to",
         type=str,
         default="sonali721",
-        help=(
-            "Linphone SIP username or full SIP URI. "
-            "Example: sonali721"
-        ),
+        help=("Linphone SIP username or full SIP URI. Example: sonali721"),
     )
 
     args = parser.parse_args()
 
-    asyncio.run(
-        make_outbound_call(args.to)
-    )
+    asyncio.run(make_outbound_call(args.to))
 
 
 # ============================================================

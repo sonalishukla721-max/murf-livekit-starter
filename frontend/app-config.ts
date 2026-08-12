@@ -33,20 +33,25 @@ export interface AppConfig {
 }
 
 export const APP_CONFIG_DEFAULTS: AppConfig = {
-  companyName: 'Murf AI',
-  pageTitle: 'Voice Agent Starter',
-  pageDescription: 'A voice agent powered by Murf Falcon — the fastest TTS API',
+  companyName: 'FinSahayak AI',
+  pageTitle: 'FinSahayak AI — Smart Financial Guidance. Human Help When It Matters.',
+  pageDescription:
+    'AI financial assistant with intelligent voice, real-time guidance, and seamless human escalation support.',
 
   supportsChatInput: true,
-  supportsVideoInput: true,
-  supportsScreenShare: true,
+  supportsVideoInput: false,
+  supportsScreenShare: false,
   isPreConnectBufferEnabled: true,
 
   logo: '/murf-logo.svg',
-  accent: '#6366F1',
+  accent: '#2563EB',
   logoDark: '/murf-logo-dark.svg',
-  accentDark: '#818cf8',
-  startButtonText: 'Start talking',
+  accentDark: '#3B82F6',
+  startButtonText: 'Talk to FinSahayak',
+  audioVisualizerType: 'wave',
+  audioVisualizerColor: '#2563EB',
+  audioVisualizerColorDark: '#3B82F6',
+  audioVisualizerWaveLineWidth: 3,
 
   // optional: audio visualization configuration
   // audioVisualizerType: 'bar',

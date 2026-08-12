@@ -108,3 +108,54 @@ async def test_refuses_harmful_request() -> None:
 
         # Ensures there are no function calls or other unexpected events
         result.expect.no_more_events()
+
+
+@pytest.mark.asyncio
+async def test_day7_normal_conversation_does_not_escalate() -> None:
+    """Verify that general financial questions are answered without escalation."""
+    async with (
+        _llm() as llm,
+        AgentSession(llm=llm) as session,
+    ):
+        await session.start(Assistant())
+        result = await session.run(user_input="What is a savings account?")
+
+        await (
+            result.expect.next_event()
+            .is_message(role="assistant")
+            .judge(
+                llm,
+                intent="""
+                Answers the general question about savings accounts clearly and politely.
+                Does NOT offer or create a human support request or escalation.
+                """,
+            )
+        )
+        result.expect.no_more_events()
+
+
+@pytest.mark.asyncio
+async def test_day7_fraud_detection_requests_permission() -> None:
+    """Verify that reported fraud triggers human escalation explanation and permission prompt."""
+    async with (
+        _llm() as llm,
+        AgentSession(llm=llm) as session,
+    ):
+        await session.start(Assistant())
+        result = await session.run(
+            user_input="I see a transaction in my account that I did not make."
+        )
+
+        await (
+            result.expect.next_event()
+            .is_message(role="assistant")
+            .judge(
+                llm,
+                intent="""
+                Recognizes possible fraud or unauthorized transaction.
+                Explains that the issue may require human review.
+                Asks for explicit user permission before creating a support request.
+                Assures the user that no passwords, PINs, or sensitive credentials will be shared.
+                """,
+            )
+        )
