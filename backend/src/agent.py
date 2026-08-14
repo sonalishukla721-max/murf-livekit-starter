@@ -1,10 +1,13 @@
 import asyncio
+import contextlib
 import json
 import logging
 import os
 import random
 import urllib.request
 from datetime import datetime
+
+_bg_tasks: set[asyncio.Task] = set()
 
 from dotenv import load_dotenv
 from livekit import rtc
@@ -34,9 +37,19 @@ from livekit.plugins.turn_detector.multilingual import MultilingualModel
 # ============================================================
 
 try:
-    from db import sanitize_sensitive_data, save_call_record, save_escalation, set_opt_out_status
+    from db import (
+        sanitize_sensitive_data,
+        save_call_record,
+        save_escalation,
+        set_opt_out_status,
+    )
 except ModuleNotFoundError:
-    from src.db import sanitize_sensitive_data, save_call_record, save_escalation, set_opt_out_status
+    from src.db import (
+        sanitize_sensitive_data,
+        save_call_record,
+        save_escalation,
+        set_opt_out_status,
+    )
 
 
 # ============================================================
@@ -138,7 +151,7 @@ When an escalation scenario (Possible Fraud or Complex Case) is detected:
 3. Explicitly state that NO sensitive credentials (passwords, PINs, OTPs, CVVs) will be stored or shared.
 4. ASK FOR EXPLICIT CONSENT BEFORE CALLING THE TOOL.
    Example phrase:
-   "I understand. This situation may need human review. I can create a support request with your name, a short description of the issue, urgency, language, and preferred follow-up method. I will not include passwords, PINs, OTPs, CVVs, or unnecessary sensitive information. Would you like me to create this request?"
+   "I understand. An unauthorized transaction or potential fraud is serious and may need human review. I can create a support request with your name, a short description of the issue, urgency, language, and preferred follow-up method. I will not include passwords, PINs, OTPs, CVVs, or unnecessary sensitive information. Would you like me to create this request?"
 
 5. IF THE USER SAYS YES:
    Call the `create_escalation` tool immediately with:
@@ -162,6 +175,87 @@ OUTBOUND CALL RULES:
 
 Your name is FinSahayak.
 You are a safe, concise, and trustworthy Financial Services AI voice assistant.
+
+DAY 9 — GOVERNMENT SCHEME SPECIALIST HANDOFF GUIDELINES:
+
+You have a handoff tool: handoff_to_government_scheme_specialist
+
+When a user asks questions specifically about government schemes, eligibility for government schemes, government subsidies, student scholarships, agricultural schemes, small business schemes, or government financial programs:
+Examples that MUST trigger handoff:
+- "What government schemes can help students?"
+- "Which government scheme can help farmers financially?"
+- "What schemes are available for small businesses?"
+- "Am I eligible for a government financial scheme?"
+- "Tell me about PM Kisan / Mudra Loan / Atal Pension Yojana"
+- "What documents are required for this government scheme?"
+
+When the user asks about government schemes:
+1. Announce the handoff clearly: "I'll connect you with our Government Scheme Specialist."
+2. Call `handoff_to_government_scheme_specialist` with the user's request and conversation summary.
+
+DO NOT HANDOFF normal banking and general financial questions:
+- "What is a savings account?"
+- "How does EMI work?"
+- "What is a fixed deposit?"
+- "What documents are generally required to open a bank account?"
+- "What is compound interest?"
+Answer these general banking questions directly yourself without handing off.
+"""
+
+
+# ============================================================
+# DAY 9 — GOVERNMENT SCHEME SPECIALIST SYSTEM PROMPT
+# ============================================================
+
+SPECIALIST_SYSTEM_PROMPT = """
+You are the Government Scheme Specialist for FinSahayak AI.
+
+Tagline: "Scheme Guidance. Step by Step."
+
+Your ONLY primary responsibility is to help users understand government financial schemes.
+
+You can help with:
+- Scheme purpose and general benefits
+- Basic eligibility criteria
+- Required documents for applications
+- Application requirements and process overview
+- Scheme-specific questions using available verified tools
+
+You must:
+- Stay strictly focused on government financial schemes.
+- Use available tools (check_scheme_eligibility, get_document_list, get_financial_scheme_info) whenever possible.
+- Ask only for information necessary to answer the user's question.
+- Explain financial information clearly and simply, in plain spoken language.
+- Never request passwords, OTPs, PINs, card numbers, CVV, or other authentication secrets.
+- Never invent scheme details or guarantee scheme approval.
+- Clearly explain when information cannot be verified.
+- Escalate to human support using the create_escalation tool when the situation warrants it.
+- Maintain the context received from the main FinSahayak agent.
+- Never ask the user to repeat their entire question — context has already been passed to you.
+
+You can communicate in English, Hindi, and Hinglish. Automatically adapt to the user's language.
+
+VOICE & RESPONSE RULES:
+1. Always be polite, concise, professional, and clear.
+2. Your responses are spoken aloud. Do NOT use markdown formatting (no bolding, asterisks, bullet points, emojis, or tables).
+3. Keep responses short, usually one to three conversational sentences.
+4. You are an AI specialist assistant. Never pretend to be a human or official government advisor.
+5. Never ask for sensitive information: OTP, PIN, CVV, passwords, card numbers, full account numbers.
+6. If the user mentions sensitive credentials, politely remind them you do not need those.
+
+IF THE USER ASKS SOMETHING OUTSIDE GOVERNMENT SCHEMES:
+- Answer briefly if it is very simple and safe.
+- Otherwise, offer to hand back: "That's outside my specialist area — let me connect you back with FinSahayak for that question."
+- Then call the handoff_back_to_finsahayak tool.
+
+DAY 7 — HUMAN ESCALATION:
+You may also create human support requests using the create_escalation tool, following the same protocol:
+1. Explain the situation requires human review.
+2. Inform what will be included (name, summary, urgency — NO credentials).
+3. Get explicit user consent BEFORE calling the tool.
+4. After tool returns, confirm the Reference ID to the user.
+
+Do NOT escalate for normal scheme questions — only for fraud, complex unresolvable cases, or when the user explicitly requests a human.
 """
 
 
@@ -449,9 +543,11 @@ class FinSahayakAgent(Agent):
         """
         Provide information about a government or bank financial scheme.
         Call this when the user asks about any financial scheme, its benefits, or how to apply.
+        Also call this when the user says "show me schemes" or asks to list available schemes.
 
         Parameters:
-        - scheme_name: Name of the scheme (e.g., "PM Kisan", "Atal Pension Yojana", "Mudra Loan")
+        - scheme_name: Name of the scheme (e.g., "PM Kisan", "Atal Pension Yojana", "Mudra Loan").
+          Leave empty or omit when user asks for a general list of available schemes.
         """
         logger.info(
             "[FINSAHAYAK] Scheme info requested. Scheme: %s",
@@ -462,13 +558,540 @@ class FinSahayakAgent(Agent):
         self._call_successful = True
         self._failure_type = None
 
-        scheme = scheme_name.strip() or "the requested scheme"
+        scheme = scheme_name.strip()
+
+        # No specific scheme — return a helpful list of popular schemes
+        if not scheme:
+            return (
+                "Here are some popular government financial schemes I can tell you about. "
+                "PM Kisan Samman Nidhi gives income support to farmers. "
+                "Pradhan Mantri Mudra Yojana provides collateral-free loans to small businesses. "
+                "Atal Pension Yojana is a pension scheme for unorganised sector workers. "
+                "PM Jan Dhan Yojana provides zero-balance bank accounts. "
+                "PM Awas Yojana provides housing assistance. "
+                "Which scheme would you like to know more about?"
+            )
+
+        # Detailed info for known schemes
+        scheme_details = {
+            "pm kisan": (
+                "PM Kisan Samman Nidhi provides direct income support of 6000 rupees per year "
+                "to eligible farmer families in three installments. Farmers with less than 2 hectares "
+                "of cultivable land are typically eligible."
+            ),
+            "mudra": (
+                "Pradhan Mantri Mudra Yojana offers collateral-free loans to small businesses. "
+                "It has three categories: Shishu up to 50000 rupees, Kishore up to 5 lakhs, "
+                "and Tarun up to 10 lakhs."
+            ),
+            "atal pension": (
+                "Atal Pension Yojana is a government-backed pension scheme for workers aged 18 to 40. "
+                "After age 60, you receive a guaranteed monthly pension of 1000 to 5000 rupees."
+            ),
+            "jan dhan": (
+                "Pradhan Mantri Jan Dhan Yojana provides universal access to banking — "
+                "zero-balance savings accounts, debit cards, and basic insurance coverage."
+            ),
+            "pmay": (
+                "Pradhan Mantri Awas Yojana provides housing assistance and home loan interest "
+                "subsidies to eligible beneficiaries from economically weaker sections."
+            ),
+            "nsp": (
+                "NSP or National Scholarship Portal hosts various Central and State government "
+                "scholarships for students from economically weaker sections, SC, ST, OBC, and minority communities. "
+                "Eligibility varies by scholarship category and family income."
+            ),
+        }
+
+        scheme_lower = scheme.lower()
+        for key, detail in scheme_details.items():
+            if key in scheme_lower:
+                return (
+                    f"{detail} "
+                    f"Would you like me to check eligibility or get the required document list for this scheme?"
+                )
+
         return (
             f"I can provide general information about {scheme}. "
-            f"This scheme is designed to support eligible beneficiaries through direct financial assistance or credit access. "
+            f"This scheme is designed to support eligible beneficiaries through financial assistance or credit access. "
             f"To get the latest details, benefits, and application process, please visit the official government portal "
-            f"or your nearest bank branch. I can also help you check your eligibility or prepare the document list."
+            f"or your nearest bank branch. I can also help you check eligibility or get the document list."
         )
+
+    @function_tool
+    async def handoff_to_government_scheme_specialist(
+        self,
+        context: RunContext,
+        user_request: str = "",
+        conversation_summary: str = "",
+    ) -> str:
+        """
+        Transfer the conversation to the Government Scheme Specialist when the user asks
+        about government schemes, scheme eligibility, benefits, required documents,
+        or application guidance.
+
+        Parameters:
+        - user_request: The user's specific question (as they said it)
+        - conversation_summary: A brief one-sentence summary of the conversation so far
+        """
+        import asyncio
+
+        logger.info(
+            "[FINSAHAYAK] Scheduling handoff to Government Scheme Specialist. Request: %s",
+            user_request,
+        )
+
+        try:
+            specialist = GovernmentSchemeSpecialist(
+                user_request=user_request,
+                conversation_summary=conversation_summary,
+            )
+
+            session = context.session
+            with contextlib.suppress(Exception):
+                session.userdata["call_successful"] = getattr(
+                    self, "_call_successful", False
+                )
+
+            # IMPORTANT: We must NOT call session.update_agent() synchronously here.
+            # Calling it inside a @function_tool before returning disrupts the current
+            # LLM response pipeline and prevents the handoff announcement from being spoken.
+            # Instead, we defer the agent switch using asyncio.create_task so that:
+            #   1. This tool returns the announcement text immediately.
+            #   2. The LLM speaks the announcement via TTS.
+            #   3. THEN the specialist takes over and generates its greeting.
+            async def _deferred_handoff():
+                try:
+                    # Wait for the announcement speech to be generated and started
+                    await asyncio.sleep(3)
+                    session.update_agent(specialist)
+                    logger.info(
+                        "[FINSAHAYAK] Agent switched to GovernmentSchemeSpecialist."
+                    )
+                    # Trigger the specialist to generate its own intro/greeting
+                    await session.generate_reply()
+                except Exception as task_exc:
+                    logger.exception(
+                        "[FINSAHAYAK] Deferred handoff task failed: %s", task_exc
+                    )
+
+            _handoff_task = asyncio.create_task(_deferred_handoff())
+            _bg_tasks.add(_handoff_task)
+            _handoff_task.add_done_callback(_bg_tasks.discard)
+
+            logger.info("[FINSAHAYAK] Handoff task created. Returning announcement.")
+
+            return (
+                "I'll connect you with our Government Scheme Specialist who can help you "
+                "with the scheme eligibility and document requirements. One moment."
+            )
+
+        except Exception as exc:
+            logger.exception("[FINSAHAYAK] Handoff setup failed: %s", exc)
+            return (
+                "I'm unable to connect to the specialist right now, but I can still "
+                "help with the information I have, or connect you with human support if needed."
+            )
+
+
+# ============================================================
+# DAY 9 — GOVERNMENT SCHEME SPECIALIST AGENT
+# ============================================================
+
+
+class GovernmentSchemeSpecialist(Agent):
+    """Specialist agent for government financial scheme guidance."""
+
+    _call_successful: bool = False
+    _failure_type: str = "TASK_INCOMPLETE"
+
+    def __init__(
+        self,
+        user_request: str = "",
+        conversation_summary: str = "",
+    ) -> None:
+        # Inject conversation context from the main agent into the system prompt
+        # so the specialist never has to ask the user to repeat themselves.
+        context_block = ""
+        if user_request:
+            context_block = (
+                "\n\n--- HANDOFF CONTEXT FROM FINSAHAYAK MAIN AGENT ---\n"
+                f"User's original inquiry/topic: {user_request}\n"
+            )
+            if conversation_summary:
+                context_block += f"Conversation summary: {conversation_summary}\n"
+            context_block += (
+                "\nCRITICAL HANDOFF INSTRUCTIONS:\n"
+                "- You already know the topic/scheme being discussed from the context above.\n"
+                "- When the user asks follow-up questions (such as 'What documents do I need?' or 'How do I apply?'), immediately answer for the scheme/topic mentioned in the context above (for example, student scholarships/schemes like NSP, PM Kisan for farmers, Mudra Loan for small business, etc.).\n"
+                "- Directly provide the required document list or details. For student schemes/scholarships, standard documents are: Aadhaar card, income certificate/proof, previous marksheets or educational certificates, student ID/admission receipt, and bank account details.\n"
+                "- Never ask the user to repeat what scheme they are asking about or to re-specify their request.\n"
+                "--- END HANDOFF CONTEXT ---\n"
+            )
+
+        full_prompt = context_block + SPECIALIST_SYSTEM_PROMPT
+        super().__init__(instructions=full_prompt)
+        self._user_request = user_request
+        self._conversation_summary = conversation_summary
+
+    # ----------------------------------------------------------
+    # SCHEME TOOLS (reused from main agent logic)
+    # ----------------------------------------------------------
+
+    @function_tool
+    async def check_scheme_eligibility(
+        self,
+        context: RunContext,
+        age: str = "",
+        income: str = "",
+        category: str = "",
+        scheme_name: str = "",
+    ) -> str:
+        """
+        Check if a user is eligible for a government financial scheme based on basic
+        non-sensitive criteria.
+
+        Parameters:
+        - age: User's age (e.g., "35")
+        - income: Annual income range (e.g., "below 2 lakhs")
+        - category: Category like "general", "SC/ST/OBC", "woman", "farmer"
+        - scheme_name: Name of the scheme to check (e.g., "PM Kisan", "Mudra Loan")
+        """
+        logger.info(
+            "[SPECIALIST] Eligibility check. Scheme: %s, Age: %s, Category: %s",
+            scheme_name,
+            age,
+            category,
+        )
+
+        self._call_successful = True
+        self._failure_type = None
+
+        with contextlib.suppress(Exception):
+            context.session.userdata["call_successful"] = True
+
+        scheme = scheme_name.strip() or "the requested scheme"
+        return (
+            f"Based on the information provided — age {age or 'not specified'}, "
+            f"income {income or 'not specified'}, category {category or 'not specified'} — "
+            f"you may be eligible for {scheme}. "
+            f"Please visit your nearest bank branch or the official government portal to complete "
+            f"the formal verification and documentation process. "
+            f"No sensitive credentials are needed for this eligibility check."
+        )
+
+    @function_tool
+    async def get_document_list(
+        self,
+        context: RunContext,
+        service_type: str = "",
+    ) -> str:
+        """
+        Return the standard document list required for a government financial scheme.
+        Call this when the user asks what documents are needed for a scheme.
+
+        Parameters:
+        - service_type: Type of financial service or scheme
+          (e.g., "PM Kisan", "Mudra Loan", "Atal Pension Yojana")
+        """
+        logger.info(
+            "[SPECIALIST] Document list requested. Service: %s",
+            service_type,
+        )
+
+        self._call_successful = True
+        self._failure_type = None
+
+        with contextlib.suppress(Exception):
+            context.session.userdata["call_successful"] = True
+
+        service = service_type.strip() or "this scheme"
+        doc_lists = {
+            "home loan": "Aadhaar card, PAN card, income proof (salary slips or ITR), property documents, bank statements for 6 months.",
+            "mudra loan": "Aadhaar card, PAN card, business proof, bank statements for 6 months, passport photo.",
+            "pm kisan": "Aadhaar card, land ownership documents, bank account details linked to Aadhaar.",
+            "savings account": "Aadhaar card, PAN card, one passport-size photograph, and address proof.",
+            "atal pension": "Aadhaar card, savings bank account number, mobile number linked to Aadhaar.",
+            "jan dhan": "Aadhaar card or any valid government-issued identity proof and address proof.",
+            "pmay": "Aadhaar card, income certificate, property documents, bank account details.",
+        }
+
+        service_lower = service.lower()
+        for key, docs in doc_lists.items():
+            if key in service_lower:
+                return f"For {service}, the standard documents required are: {docs}"
+
+        return (
+            f"For {service}, you will typically need: Aadhaar card, PAN card, income or address proof, "
+            f"and relevant scheme-specific documents. Please confirm with your bank or the concerned "
+            f"government office for the exact current list."
+        )
+
+    @function_tool
+    async def get_financial_scheme_info(
+        self,
+        context: RunContext,
+        scheme_name: str = "",
+    ) -> str:
+        """
+        Provide information about a government financial scheme — its purpose, benefits,
+        and how to apply. Call this when the user asks about any government scheme.
+
+        Parameters:
+        - scheme_name: Name of the scheme (e.g., "PM Kisan", "Atal Pension Yojana", "Mudra Loan")
+        """
+        logger.info(
+            "[SPECIALIST] Scheme info requested. Scheme: %s",
+            scheme_name,
+        )
+
+        self._call_successful = True
+        self._failure_type = None
+
+        with contextlib.suppress(Exception):
+            context.session.userdata["call_successful"] = True
+
+        scheme = scheme_name.strip() or "the requested scheme"
+
+        scheme_details = {
+            "pm kisan": (
+                "PM Kisan Samman Nidhi provides direct income support of 6000 rupees per year "
+                "to eligible farmer families in three installments. Farmers with less than 2 hectares "
+                "of cultivable land are typically eligible."
+            ),
+            "mudra loan": (
+                "Pradhan Mantri Mudra Yojana offers collateral-free loans to small businesses and "
+                "entrepreneurs. It has three categories: Shishu up to 50000 rupees, Kishore up to "
+                "5 lakhs, and Tarun up to 10 lakhs."
+            ),
+            "atal pension": (
+                "Atal Pension Yojana is a government-backed pension scheme for unorganised sector workers. "
+                "Citizens aged 18 to 40 can join and receive a guaranteed monthly pension of "
+                "1000 to 5000 rupees after age 60."
+            ),
+            "jan dhan": (
+                "Pradhan Mantri Jan Dhan Yojana provides universal access to banking services, "
+                "including zero-balance savings accounts, debit cards, and basic insurance coverage."
+            ),
+            "pmay": (
+                "Pradhan Mantri Awas Yojana provides housing assistance and interest subsidies "
+                "on home loans to eligible beneficiaries from economically weaker sections and "
+                "low-income groups."
+            ),
+        }
+
+        scheme_lower = scheme.lower()
+        for key, detail in scheme_details.items():
+            if key in scheme_lower:
+                return (
+                    f"{detail} "
+                    f"To apply, please visit your nearest bank branch or the official government portal. "
+                    f"I can also help you check your eligibility or get the required document list."
+                )
+
+        return (
+            f"I can provide general information about {scheme}. "
+            f"This scheme is designed to support eligible beneficiaries through financial assistance or credit access. "
+            f"To get the latest details, benefits, and application process, please visit the official government "
+            f"portal or your nearest bank branch. I can also help you check your eligibility or prepare "
+            f"the document list."
+        )
+
+    # ----------------------------------------------------------
+    # HUMAN ESCALATION (Day 7 — reused by specialist)
+    # ----------------------------------------------------------
+
+    @function_tool
+    async def create_escalation(
+        self,
+        context: RunContext,
+        user_name: str = "Valued Customer",
+        issue_type: str = "Complex Financial Case",
+        summary: str = "",
+        urgency: str = "medium",
+        language: str = "English",
+        preferred_followup: str = "Phone",
+    ) -> str:
+        """
+        Create a human support request when the user's situation cannot be safely resolved
+        by the Government Scheme Specialist and the user has given explicit permission.
+
+        Parameters:
+        - user_name: Name of the customer (default "Valued Customer")
+        - issue_type: "Possible Fraud" or "Complex Financial Case"
+        - summary: Brief summary of what happened
+        - urgency: "high", "medium", "low", or "emergency"
+        - language: Preferred interaction language
+        - preferred_followup: "Phone" or "Email"
+        """
+        logger.info(
+            "[SPECIALIST] Creating escalation. Issue: %s, User: %s",
+            issue_type,
+            user_name,
+        )
+
+        try:
+            year = datetime.now().year
+            rand_digits = random.randint(1000, 9999)
+            reference_id = f"FIN-{year}-{rand_digits}"
+
+            res = save_escalation(
+                user_name=user_name,
+                issue_type=issue_type,
+                summary=summary,
+                urgency=urgency,
+                language=language,
+                preferred_followup=preferred_followup,
+                reference_id=reference_id,
+            )
+
+            ref_id = res.get("reference_id", reference_id)
+            logger.info("[SPECIALIST] Escalation created. Ref ID: %s", ref_id)
+
+            webhook_url = os.environ.get("DISCORD_WEBHOOK_URL")
+            if webhook_url:
+                try:
+                    sanitized_sum = sanitize_sensitive_data(summary)
+                    payload = {
+                        "embeds": [
+                            {
+                                "title": "🚨 FinSahayak Specialist — Human Support Request",
+                                "color": 15158332
+                                if urgency in ["high", "emergency"]
+                                else 3447003,
+                                "fields": [
+                                    {
+                                        "name": "Reference ID",
+                                        "value": ref_id,
+                                        "inline": True,
+                                    },
+                                    {
+                                        "name": "Issue Type",
+                                        "value": issue_type,
+                                        "inline": True,
+                                    },
+                                    {
+                                        "name": "Urgency",
+                                        "value": urgency.upper(),
+                                        "inline": True,
+                                    },
+                                    {
+                                        "name": "User",
+                                        "value": user_name,
+                                        "inline": True,
+                                    },
+                                    {
+                                        "name": "Language",
+                                        "value": language,
+                                        "inline": True,
+                                    },
+                                    {
+                                        "name": "Follow-up",
+                                        "value": preferred_followup,
+                                        "inline": True,
+                                    },
+                                    {
+                                        "name": "Source",
+                                        "value": "Government Scheme Specialist",
+                                        "inline": True,
+                                    },
+                                    {
+                                        "name": "Summary",
+                                        "value": sanitized_sum
+                                        or "Human review requested.",
+                                    },
+                                ],
+                                "timestamp": datetime.utcnow().isoformat(),
+                            }
+                        ]
+                    }
+                    data = json.dumps(payload).encode("utf-8")
+                    req = urllib.request.Request(
+                        webhook_url,
+                        data=data,
+                        headers={
+                            "Content-Type": "application/json",
+                            "User-Agent": "FinSahayak-AI",
+                        },
+                    )
+                    urllib.request.urlopen(req, timeout=3)
+                except Exception as w_err:
+                    logger.warning("[SPECIALIST] Discord webhook failed: %s", w_err)
+
+            return (
+                f"Support request created successfully. "
+                f"Reference ID: {ref_id}. Status: open. "
+                f"Inform the customer that their reference ID is {ref_id} "
+                f"and a human representative will review the case."
+            )
+
+        except Exception as exc:
+            logger.exception("[SPECIALIST] Failed to create escalation: %s", exc)
+            return "Failed to create support request due to a system issue. Please ask the user to try again later."
+
+    # ----------------------------------------------------------
+    # OPTIONAL HAND-BACK TO MAIN AGENT
+    # ----------------------------------------------------------
+
+    @function_tool
+    async def handoff_back_to_finsahayak(
+        self,
+        context: RunContext,
+        conversation_summary: str = "",
+    ) -> str:
+        """
+        Hand the conversation back to the main FinSahayak agent when the user asks something
+        outside the Government Scheme Specialist's area — for example, general banking questions,
+        savings accounts, fixed deposits, EMI calculations, or general financial guidance.
+
+        Parameters:
+        - conversation_summary: Brief summary of what was discussed with the specialist
+        """
+        logger.info(
+            "[SPECIALIST] Handing back to main FinSahayak agent. Summary: %s",
+            conversation_summary,
+        )
+
+        try:
+            # Persist current success state before switching back
+            with contextlib.suppress(Exception):
+                context.session.userdata["call_successful"] = getattr(
+                    self, "_call_successful", False
+                )
+
+            session = context.session
+            main_agent = FinSahayakAgent()
+
+            async def _deferred_handback():
+                try:
+                    await asyncio.sleep(3)
+                    session.update_agent(main_agent)
+                    logger.info("[SPECIALIST] Agent switched back to FinSahayakAgent.")
+                    await session.generate_reply()
+                except Exception as task_exc:
+                    logger.exception(
+                        "[SPECIALIST] Deferred hand-back failed: %s", task_exc
+                    )
+
+            _handback_task = asyncio.create_task(_deferred_handback())
+            _bg_tasks.add(_handback_task)
+            _handback_task.add_done_callback(_bg_tasks.discard)
+
+            logger.info(
+                "[SPECIALIST] Hand-back task scheduled. Returning announcement."
+            )
+
+            return (
+                "Let me connect you back with FinSahayak who can help you with "
+                "general financial questions. One moment."
+            )
+
+        except Exception as exc:
+            logger.exception("[SPECIALIST] Hand-back to main agent failed: %s", exc)
+            return (
+                "I'll help with that briefly. For detailed general financial guidance, "
+                "FinSahayak's main assistant would be the best resource."
+            )
 
 
 # Backward compatibility
@@ -538,8 +1161,6 @@ async def my_agent(ctx: JobContext):
     # delays AgentSession startup enough to make the frontend report:
     # "Agent joined the room but did not complete initializing."
     is_sip_call = False
-    sip_participant = None
-
     for participant in ctx.room.remote_participants.values():
         logger.info(
             "[FINSAHAYAK] Remote participant detected: %s | kind=%s",
@@ -548,7 +1169,6 @@ async def my_agent(ctx: JobContext):
         )
 
         if participant.kind == rtc.ParticipantKind.PARTICIPANT_KIND_SIP:
-            sip_participant = participant
             is_sip_call = True
             logger.info(
                 "[FINSAHAYAK] SIP participant already present: %s",
@@ -707,12 +1327,34 @@ async def my_agent(ctx: JobContext):
         import datetime as _dt2
 
         session_end = _dt2.datetime.now(_dt2.timezone.utc)
-        duration_secs = max(
-            0, int((session_end - session_start).total_seconds())
-        )
+        duration_secs = max(0, int((session_end - session_start).total_seconds()))
 
-        call_success = getattr(agent_instance, "_call_successful", False)
-        call_failure_type = getattr(agent_instance, "_failure_type", "TASK_INCOMPLETE")
+        # Read success state — check session.userdata first (written by any agent
+        # during the session, including the specialist after handoff), then fall back
+        # to the initial agent_instance attributes.
+        try:
+            userdata_success = session.userdata.get("call_successful", None)
+        except Exception:
+            userdata_success = None
+
+        try:
+            current_agent = session.current_agent
+            current_success = getattr(current_agent, "_call_successful", False)
+            current_failure = getattr(current_agent, "_failure_type", "TASK_INCOMPLETE")
+        except Exception:
+            current_success = False
+            current_failure = "TASK_INCOMPLETE"
+
+        call_success = bool(
+            userdata_success
+            or current_success
+            or getattr(agent_instance, "_call_successful", False)
+        )
+        call_failure_type = (
+            current_failure
+            if current_success
+            else getattr(agent_instance, "_failure_type", "TASK_INCOMPLETE")
+        )
 
         # Detect hang-up with no meaningful exchange
         if not call_success and duration_secs < 10:
@@ -739,9 +1381,7 @@ async def my_agent(ctx: JobContext):
                 duration_secs,
             )
         except Exception as db_err:
-            logger.exception(
-                "[FINSAHAYAK] Failed to save call record: %s", db_err
-            )
+            logger.exception("[FINSAHAYAK] Failed to save call record: %s", db_err)
 
 
 # ============================================================

@@ -406,12 +406,12 @@ def get_escalation_stats() -> dict:
 def save_call_record(
     session_id: str,
     user_id: str = "anonymous",
-    started_at: str = None,
-    ended_at: str = None,
+    started_at: str | None = None,
+    ended_at: str | None = None,
     duration: int = 0,
     channel: str = "browser",
     outcome: str = "FAILED",
-    failure_type: str = None,
+    failure_type: str | None = None,
     success: int = 0,
 ) -> dict:
     init_db()
@@ -496,4 +496,3 @@ def get_call_analytics() -> dict:
 if __name__ == "__main__":
     init_db()
     print("Database initialized successfully.")
-

@@ -1,7 +1,7 @@
 import pytest
 from livekit.agents import AgentSession, inference, llm
 
-from agent import Assistant
+from agent import Assistant, GovernmentSchemeSpecialist
 
 
 def _llm() -> llm.LLM:
@@ -156,6 +156,64 @@ async def test_day7_fraud_detection_requests_permission() -> None:
                 Explains that the issue may require human review.
                 Asks for explicit user permission before creating a support request.
                 Assures the user that no passwords, PINs, or sensitive credentials will be shared.
+                """,
+            )
+        )
+
+
+@pytest.mark.asyncio
+async def test_day9_scheme_triggers_specialist_handoff() -> None:
+    """Verify that government scheme questions trigger specialist handoff."""
+    async with (
+        _llm() as llm,
+        AgentSession(llm=llm) as session,
+    ):
+        await session.start(Assistant())
+        result = await session.run(
+            user_input="Are there government financial schemes for students?"
+        )
+
+        # Agent announces handoff and calls the handoff tool
+        await (
+            result.expect.next_event()
+            .is_message(role="assistant")
+            .judge(
+                llm,
+                intent="""
+                Announces connecting or transferring the user to the Government Scheme Specialist.
+                """,
+            )
+        )
+        result.expect.next_event().is_function_call(
+            name="handoff_to_government_scheme_specialist"
+        )
+
+
+@pytest.mark.asyncio
+async def test_day9_specialist_answers_with_context() -> None:
+    """Verify that the Government Scheme Specialist uses handed-off context."""
+    async with (
+        _llm() as llm,
+        AgentSession(llm=llm) as session,
+    ):
+        specialist = GovernmentSchemeSpecialist(
+            user_request="What government schemes can help students?",
+            conversation_summary="User is asking about student scholarships and financial assistance schemes.",
+        )
+        await session.start(specialist)
+        result = await session.run(user_input="What documents do I need?")
+
+        # Specialist calls get_document_list tool using context
+        result.expect.next_event().is_function_call(name="get_document_list")
+        result.expect.next_event().is_function_call_output()
+        await (
+            result.expect.next_event()
+            .is_message(role="assistant")
+            .judge(
+                llm,
+                intent="""
+                Understands the user is asking about documents for student financial schemes/scholarships
+                based on previous context, and lists relevant standard documents (such as Aadhaar, income certificate, etc.).
                 """,
             )
         )
